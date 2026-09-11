@@ -1,0 +1,62 @@
+# Environment / secrets — never commit real keys
+.env
+.env.*
+!.env.example
+!**/.env.example
+backend/.env
+frontend/.env.local
+*.pem
+*.p12
+credentials*.json
+secrets/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+dist/
+build/
+
+# Node / Next.js
+node_modules/
+.next/
+out/
+.turbo/
+*.tsbuildinfo
+next-env.d.ts
+
+# Runtime data (tenant indexes, uploads, local TTS samples)
+backend/data/
+backend/samples/*.mp3
+*.faiss
+*.index
+
+# Reference / unrelated local copies
+verbal-bot-blueprint-main/
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Docker
+docker-data/
+
+backend/openapi_tmp.json

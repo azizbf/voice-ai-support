@@ -1,0 +1,24 @@
+fastapi==0.115.12
+uvicorn[standard]==0.34.2
+python-multipart==0.0.20
+pydantic==2.11.3
+pydantic-settings==2.9.1
+anthropic==0.51.0
+httpx==0.28.1
+numpy==2.2.5
+faiss-cpu==1.11.0
+pypdf==5.4.0
+python-dotenv==1.1.0
+slowapi==0.1.9
+aiofiles==24.1.0
+sentence-transformers==4.1.0
+edge-tts==7.0.0
+websockets==15.0.1
+orjson==3.10.16
+itsdangerous==2.2.0
+voyageai==0.3.2
+sqlalchemy[asyncio]==2.0.40
+asyncpg==0.30.0
+greenlet==3.1.1
+# Optional server STT (otherwise browser Web Speech API is used):
+faster-whisper==1.1.1

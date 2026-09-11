@@ -1,0 +1,67 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --radius: 0.75rem;
+  --background: #f0f3f9;
+  --foreground: #2a3352;
+  --primary: #1a2744;
+  --primary-foreground: #f7f9fc;
+  --accent: #4f7dff;
+  --accent-foreground: #f7f9fc;
+  --mint: #3ecf9a;
+  --ink: #2a3352;
+  --soft: #6b738c;
+}
+
+html,
+body {
+  min-height: 100%;
+}
+
+body {
+  color: var(--ink);
+  background: var(--background);
+  font-family: var(--font-body), Inter, sans-serif;
+}
+
+@layer utilities {
+  .bg-scene {
+    background:
+      radial-gradient(1100px 700px at 78% 12%, rgba(79, 125, 255, 0.4), transparent 60%),
+      radial-gradient(900px 600px at 8% 88%, rgba(62, 207, 154, 0.34), transparent 55%),
+      radial-gradient(700px 500px at 40% 40%, rgba(120, 150, 255, 0.22), transparent 60%),
+      linear-gradient(160deg, #e8eefc 0%, #f4f6fb 45%, #eef8f4 100%);
+  }
+
+  .glass {
+    background: rgba(255, 255, 255, 0.55);
+    backdrop-filter: blur(22px) saturate(150%);
+    -webkit-backdrop-filter: blur(22px) saturate(150%);
+    border: 1px solid rgba(255, 255, 255, 0.7);
+    box-shadow: 0 24px 60px -24px rgba(26, 39, 68, 0.35);
+  }
+
+  .glass-soft {
+    background: rgba(255, 255, 255, 0.42);
+    backdrop-filter: blur(14px) saturate(140%);
+    -webkit-backdrop-filter: blur(14px) saturate(140%);
+    border: 1px solid rgba(255, 255, 255, 0.6);
+  }
+}
+
+@keyframes shimmer {
+  0% {
+    background-position: 200% 0;
+  }
+  100% {
+    background-position: -200% 0;
+  }
+}
+
+.pipeline-bar {
+  background: linear-gradient(90deg, #4f7dff, #3ecf9a, #4f7dff);
+  background-size: 200% 100%;
+  animation: shimmer 1.8s linear infinite;
+}
