@@ -15,6 +15,11 @@ logger = logging.getLogger("latency")
 class LatencySample:
     tenant_id: str
     path: str
+    call_id: str | None = None
+    turn_id: str | None = None
+    trace_id: str | None = None
+    client_ttfa_ms: float | None = None
+    endpointing_ms: float | None = None
     speech_end_to_retrieval_ms: float | None = None
     retrieval_ms: float | None = None
     llm_first_token_ms: float | None = None
@@ -40,6 +45,20 @@ class LatencyStore:
         with self._lock:
             items = list(self._samples)[-n:]
         return [asdict(s) for s in items]
+
+    def percentiles(self) -> dict[str, Any]:
+        import math
+
+        samples = self.recent(200)
+        result = {}
+        for metric in ("client_ttfa_ms", "endpointing_ms", "tts_first_audio_ms", "retrieval_ms"):
+            values = sorted(s[metric] for s in samples if s.get(metric) is not None)
+            if values:
+                result[metric] = {"count": len(values), **{
+                    f"p{p}": values[max(0, math.ceil(len(values) * p / 100) - 1)]
+                    for p in (50, 95, 99)
+                }}
+        return result
 
 
 latency_store = LatencyStore()

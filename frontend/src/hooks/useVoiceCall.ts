@@ -2,6 +2,8 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { synthesizeSpeech, voiceWsUrl, type Source } from "@/lib/api";
+import { StreamingAudio } from "@/lib/streamingAudio";
+import { updateDebugTurn, type VoiceDebugTurn } from "@/lib/voiceDebug";
 
 type VoiceState = "idle" | "connecting" | "listening" | "thinking" | "speaking" | "error";
 
@@ -28,59 +30,6 @@ function getSpeechRecognition(): (new () => SpeechRecognitionLike) | null {
   return w.SpeechRecognition || w.webkitSpeechRecognition || null;
 }
 
-/** Convert recorded browser audio to 16kHz mono WAV for Whisper. */
-async function blobToWav(blob: Blob): Promise<ArrayBuffer> {
-  const audioCtx = new AudioContext();
-  try {
-    const decoded = await audioCtx.decodeAudioData(await blob.arrayBuffer());
-    const targetRate = 16000;
-    const offline = new OfflineAudioContext(1, Math.ceil(decoded.duration * targetRate), targetRate);
-    const src = offline.createBufferSource();
-    // Downmix to mono
-    const mono = offline.createBuffer(1, decoded.length, decoded.sampleRate);
-    const ch0 = mono.getChannelData(0);
-    const channels = decoded.numberOfChannels;
-    for (let i = 0; i < decoded.length; i++) {
-      let sum = 0;
-      for (let c = 0; c < channels; c++) sum += decoded.getChannelData(c)[i];
-      ch0[i] = sum / channels;
-    }
-    src.buffer = mono;
-    src.connect(offline.destination);
-    src.start(0);
-    const rendered = await offline.startRendering();
-    const pcm = rendered.getChannelData(0);
-    const samples = pcm.length;
-    const buffer = new ArrayBuffer(44 + samples * 2);
-    const view = new DataView(buffer);
-    const writeStr = (offset: number, str: string) => {
-      for (let i = 0; i < str.length; i++) view.setUint8(offset + i, str.charCodeAt(i));
-    };
-    writeStr(0, "RIFF");
-    view.setUint32(4, 36 + samples * 2, true);
-    writeStr(8, "WAVE");
-    writeStr(12, "fmt ");
-    view.setUint32(16, 16, true);
-    view.setUint16(20, 1, true);
-    view.setUint16(22, 1, true);
-    view.setUint32(24, targetRate, true);
-    view.setUint32(28, targetRate * 2, true);
-    view.setUint16(32, 2, true);
-    view.setUint16(34, 16, true);
-    writeStr(36, "data");
-    view.setUint32(40, samples * 2, true);
-    let offset = 44;
-    for (let i = 0; i < samples; i++) {
-      const s = Math.max(-1, Math.min(1, pcm[i]));
-      view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7fff, true);
-      offset += 2;
-    }
-    return buffer;
-  } finally {
-    await audioCtx.close();
-  }
-}
-
 export function useVoiceCall(tenantId: string | null, token: string | null) {
   const [state, setState] = useState<VoiceState>("idle");
   const [muted, setMuted] = useState(false);
@@ -91,6 +40,10 @@ export function useVoiceCall(tenantId: string | null, token: string | null) {
   const [interim, setInterim] = useState("");
   const [holding, setHolding] = useState(false);
   const [serverStt, setServerStt] = useState(false);
+  const [debugTurns, setDebugTurns] = useState<VoiceDebugTurn[]>([]);
+  const updateDebug = useCallback((id: string, patch: Partial<VoiceDebugTurn>) => {
+    setDebugTurns(turns => updateDebugTurn(turns, id, patch));
+  }, []);
 
   const wsRef = useRef<WebSocket | null>(null);
   const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
@@ -106,6 +59,7 @@ export function useVoiceCall(tenantId: string | null, token: string | null) {
   const timerRef = useRef<number | null>(null);
   const startedAtRef = useRef<number | null>(null);
   const activeRef = useRef(false);
+  const captureStartingRef = useRef(false);
   const mutedRef = useRef(false);
   const mimeRef = useRef("audio/webm");
   const holdModeRef = useRef<"speech" | "media" | null>(null);
@@ -117,14 +71,89 @@ export function useVoiceCall(tenantId: string | null, token: string | null) {
   const speakQueueRef = useRef<string[]>([]);
   const speakBusyRef = useRef(false);
   const usedSpeakEventsRef = useRef(false);
+  const streamPlayerRef = useRef<StreamingAudio | null>(null);
+  const responsePendingRef = useRef(false);
+  const turnTimingRef = useRef<{ id: string; speechEnd: number; endpointing: number; begunAt: number; firstAudioAt?: number } | null>(null);
+  const thinkingTimerRef = useRef<number | null>(null);
+  const thinkingUtteranceRef = useRef<SpeechSynthesisUtterance | null>(null);
+
+  const stopThinkingPhrase = useCallback(() => {
+    if (thinkingTimerRef.current !== null) window.clearTimeout(thinkingTimerRef.current);
+    thinkingTimerRef.current = null;
+    if (thinkingUtteranceRef.current) window.speechSynthesis?.cancel();
+    thinkingUtteranceRef.current = null;
+  }, []);
+
+  const beginTurn = useCallback((speechEnd: number, input: "audio" | "browser") => {
+    stopThinkingPhrase();
+    const id = crypto.randomUUID();
+    const begunAt = performance.now();
+    const endpointing = begunAt - speechEnd;
+    turnTimingRef.current = { id, speechEnd, endpointing, begunAt };
+    setDebugTurns(turns => [{ id, createdAt: Date.now(), input, status: "pending", stages: { endpointing: { duration: endpointing } } }, ...turns].slice(0, 10) as VoiceDebugTurn[]);
+    responsePendingRef.current = true;
+    setState("thinking");
+    thinkingTimerRef.current = window.setTimeout(() => {
+      thinkingTimerRef.current = null;
+      if (!activeRef.current || !responsePendingRef.current || playingRef.current || !window.speechSynthesis) return;
+      const utterance = new SpeechSynthesisUtterance("Un instant, s’il vous plaît.");
+      utterance.lang = "fr-FR";
+      thinkingUtteranceRef.current = utterance;
+      const clear = () => {
+        if (thinkingUtteranceRef.current === utterance) thinkingUtteranceRef.current = null;
+      };
+      utterance.onend = clear;
+      utterance.onerror = clear;
+      // An acknowledgement is not counted as answer audio in TTFA metrics.
+      window.speechSynthesis.speak(utterance);
+    }, 2200);
+    return id;
+  }, [stopThinkingPhrase]);
+
+  const markSent = useCallback((id: string) => {
+    const timing = turnTimingRef.current;
+    if (timing?.id === id) updateDebug(id, { stages: { preparation: { duration: performance.now() - timing.begunAt } } });
+  }, [updateDebug]);
+
+  const reportPlayback = useCallback((turnId?: string) => {
+    const timing = turnTimingRef.current;
+    const ws = wsRef.current;
+    if (!timing || (turnId && timing.id !== turnId) || ws?.readyState !== WebSocket.OPEN) return;
+    const now = performance.now();
+    updateDebug(timing.id, { status: "playing", total: now - timing.speechEnd,
+      ...(timing.firstAudioAt !== undefined ? { stages: { buffering: { duration: now - timing.firstAudioAt } } } : {}) });
+    ws.send(JSON.stringify({ type: "playback_started", turn_id: timing.id,
+      ttfa_ms: performance.now() - timing.speechEnd, endpointing_ms: timing.endpointing }));
+    turnTimingRef.current = null;
+  }, [updateDebug]);
 
   useEffect(() => {
     mutedRef.current = muted;
   }, [muted]);
 
+  const releaseMicStream = useCallback(() => {
+    mediaStreamRef.current?.getTracks().forEach((t) => t.stop());
+    mediaStreamRef.current = null;
+  }, []);
+
+  const ensureMicStream = useCallback(async () => {
+    const existing = mediaStreamRef.current;
+    if (existing && existing.getAudioTracks().some((t) => t.readyState === "live")) {
+      return existing;
+    }
+    releaseMicStream();
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        echoCancellation: true,
+        noiseSuppression: true,
+      },
+    });
+    mediaStreamRef.current = stream;
+    return stream;
+  }, [releaseMicStream]);
   const startContinuousListenRef = useRef<() => void>(() => undefined);
   const RESUME_MS = 60;
-  const SILENCE_MS = 850;
+  const SILENCE_MS = 550;
 
   const ensureAudioCtx = useCallback(async () => {
     const Ctx = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
@@ -165,6 +194,7 @@ export function useVoiceCall(tenantId: string | null, token: string | null) {
       playingRef.current = true;
       setState("speaking");
       return new Promise((resolve) => {
+        utter.onstart = () => reportPlayback();
         utter.onend = () => {
           if (browserSpeakRef.current === utter) {
             browserSpeakRef.current = null;
@@ -184,10 +214,13 @@ export function useVoiceCall(tenantId: string | null, token: string | null) {
         window.speechSynthesis.speak(utter);
       });
     },
-    [stopBrowserSpeak],
+    [reportPlayback, stopBrowserSpeak],
   );
 
   const stopPlayback = useCallback(() => {
+    stopThinkingPhrase();
+    streamPlayerRef.current?.stop();
+    streamPlayerRef.current = null;
     stopBrowserSpeak();
     audioQueueRef.current = [];
     playingRef.current = false;
@@ -214,7 +247,7 @@ export function useVoiceCall(tenantId: string | null, token: string | null) {
         /* ignore */
       }
     }
-  }, [stopBrowserSpeak]);
+  }, [stopBrowserSpeak, stopThinkingPhrase]);
 
   const pauseRecognition = useCallback(() => {
     try {
@@ -290,34 +323,6 @@ export function useVoiceCall(tenantId: string | null, token: string | null) {
     [ensureAudioCtx, pauseRecognition, stopBrowserSpeak],
   );
 
-  const flushTtsChunks = useCallback(async () => {
-    const chunks = ttsChunksRef.current;
-    ttsChunksRef.current = [];
-    ttsReceivingRef.current = false;
-    if (!chunks.length) return;
-
-    const total = chunks.reduce((n, c) => n + c.byteLength, 0);
-    const merged = new Uint8Array(total);
-    let offset = 0;
-    for (const c of chunks) {
-      merged.set(c, offset);
-      offset += c.byteLength;
-    }
-
-    usedSpeakEventsRef.current = true;
-    speakBusyRef.current = true;
-    holdModeRef.current = null;
-    setHolding(false);
-    try {
-      await playCompleteAudio(merged.buffer.slice(merged.byteOffset, merged.byteOffset + merged.byteLength));
-    } finally {
-      speakBusyRef.current = false;
-      if (activeRef.current && !mutedRef.current && !playingRef.current) {
-        window.setTimeout(() => startContinuousListenRef.current(), RESUME_MS);
-      }
-    }
-  }, [playCompleteAudio]);
-
   const speakNeural = useCallback(
     async (text: string) => {
       const cleaned = text.trim();
@@ -383,7 +388,7 @@ export function useVoiceCall(tenantId: string | null, token: string | null) {
     [drainSpeakQueue],
   );
 
-  const sendUserText = useCallback((text: string) => {
+  const sendUserText = useCallback((text: string, speechEnd = performance.now()) => {
     const cleaned = text.trim();
     if (!cleaned) return;
     const ws = wsRef.current;
@@ -397,8 +402,10 @@ export function useVoiceCall(tenantId: string | null, token: string | null) {
       { id: `${Date.now()}-u`, role: "user", text: cleaned },
     ]);
     setInterim("");
-    ws.send(JSON.stringify({ type: "user_transcript", text: cleaned }));
-  }, [stopPlayback]);
+    const turnId = beginTurn(speechEnd, "browser");
+    ws.send(JSON.stringify({ type: "user_transcript", text: cleaned, turn_id: turnId }));
+    markSent(turnId);
+  }, [beginTurn, markSent, stopPlayback]);
 
   const stopCapture = useCallback(() => {
     try {
@@ -417,13 +424,15 @@ export function useVoiceCall(tenantId: string | null, token: string | null) {
       }
     }
     mediaRecorderRef.current = null;
-    mediaStreamRef.current?.getTracks().forEach((t) => t.stop());
-    mediaStreamRef.current = null;
-  }, []);
+    releaseMicStream();
+  }, [releaseMicStream]);
 
   const cleanupSession = useCallback(
     (nextState: VoiceState = "idle") => {
       activeRef.current = false;
+      if (turnTimingRef.current) updateDebug(turnTimingRef.current.id, { status: "cancelled", error: "Appel terminé avant la lecture audio." });
+      responsePendingRef.current = false;
+      turnTimingRef.current = null;
       holdModeRef.current = null;
       speakQueueRef.current = [];
       speakBusyRef.current = false;
@@ -447,12 +456,15 @@ export function useVoiceCall(tenantId: string | null, token: string | null) {
       }
       setState(nextState);
     },
-    [stopCapture, stopPlayback],
+    [stopCapture, stopPlayback, updateDebug],
   );
 
   const beginHoldSpeech = useCallback(() => {
     const Ctor = getSpeechRecognition();
     if (!Ctor || mutedRef.current || !activeRef.current || playingRef.current) return false;
+
+    // Chrome SpeechRecognition cannot hear if getUserMedia still owns the mic.
+    releaseMicStream();
 
     try {
       recognitionRef.current?.abort();
@@ -461,60 +473,84 @@ export function useVoiceCall(tenantId: string | null, token: string | null) {
     }
 
     speechFinalRef.current = "";
-    setInterim("● À l'écoute… parlez naturellement");
+    let interimText = "";
+    let flushing = false;
+    let lastResultAt = performance.now();
+    let partialTimer: number | null = null;
+    setInterim("● Micro actif — parlez maintenant");
     const recognition = new Ctor();
     recognition.lang = "fr-FR";
     recognition.continuous = true;
     recognition.interimResults = true;
     recognitionRef.current = recognition;
 
+    const heardText = () => `${speechFinalRef.current} ${interimText}`.trim();
+
+    const flushSpeech = () => {
+      if (flushing) return false;
+      const text = heardText();
+      if (!text) return false;
+      flushing = true;
+      if (partialTimer) window.clearTimeout(partialTimer);
+      speechFinalRef.current = "";
+      interimText = "";
+      setInterim("");
+      holdModeRef.current = null;
+      setHolding(false);
+      try {
+        recognition.stop();
+      } catch {
+        /* ignore */
+      }
+      recognitionRef.current = null;
+      sendUserText(text, lastResultAt);
+      return true;
+    };
+
     let sendTimer: number | null = null;
     const armAutoSend = () => {
       if (sendTimer) window.clearTimeout(sendTimer);
       sendTimer = window.setTimeout(() => {
         if (!activeRef.current || playingRef.current || mutedRef.current) return;
-        const text = speechFinalRef.current.trim();
-        if (!text) return;
-        speechFinalRef.current = "";
-        setInterim("");
-        holdModeRef.current = null;
-        setHolding(false);
-        try {
-          recognition.stop();
-        } catch {
-          /* ignore */
-        }
-        recognitionRef.current = null;
-        sendUserText(text);
+        flushSpeech();
       }, SILENCE_MS);
     };
 
     recognition.onresult = (ev: unknown) => {
-      if (playingRef.current) return;
+      if (playingRef.current || flushing) return;
+      lastResultAt = performance.now();
       const event = ev as {
         resultIndex: number;
         results: Array<{ isFinal: boolean; 0: { transcript: string } }>;
       };
-      let interimText = "";
+      interimText = "";
       for (let i = event.resultIndex; i < event.results.length; i++) {
         const result = event.results[i];
         const piece = result[0].transcript;
         if (result.isFinal) {
           speechFinalRef.current = `${speechFinalRef.current} ${piece}`.trim();
-          armAutoSend();
         } else {
           interimText += piece;
         }
       }
-      setInterim(
-        (speechFinalRef.current + (interimText ? ` ${interimText}` : "")).trim() ||
-          "● À l'écoute…",
-      );
+      setInterim(heardText() || "● Micro actif — parlez maintenant");
+      if (heardText()) armAutoSend();
+      if (partialTimer) window.clearTimeout(partialTimer);
+      partialTimer = window.setTimeout(() => {
+        const ws = wsRef.current;
+        if (!flushing && activeRef.current && !mutedRef.current && !playingRef.current && ws?.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: "user_partial", text: heardText() }));
+        }
+      }, 250);
     };
 
     recognition.onerror = (ev: unknown) => {
       const err = ev as { error?: string };
       if (!err.error || ["no-speech", "aborted"].includes(err.error)) return;
+      if (err.error === "not-allowed") {
+        setError("Micro bloqué. Autorisez le microphone pour localhost:3000 dans Chrome.");
+        return;
+      }
       if (err.error === "network") {
         serverSttRef.current = true;
         setServerStt(true);
@@ -527,21 +563,21 @@ export function useVoiceCall(tenantId: string | null, token: string | null) {
     };
 
     recognition.onend = () => {
+      if (partialTimer) window.clearTimeout(partialTimer);
       if (sendTimer) window.clearTimeout(sendTimer);
-      if (
-        activeRef.current &&
-        !mutedRef.current &&
-        !playingRef.current &&
-        holdModeRef.current === "speech"
-      ) {
-        window.setTimeout(() => {
-          try {
-            recognition.start();
-          } catch {
-            /* ignore */
-          }
-        }, 250);
-      }
+      if (flushing) return;
+      if (!activeRef.current || mutedRef.current || playingRef.current) return;
+      if (holdModeRef.current !== "speech") return;
+      if (flushSpeech()) return;
+      window.setTimeout(() => {
+        if (!activeRef.current || mutedRef.current || playingRef.current) return;
+        if (holdModeRef.current !== "speech") return;
+        try {
+          recognition.start();
+        } catch {
+          /* ignore */
+        }
+      }, 250);
     };
 
     try {
@@ -552,13 +588,22 @@ export function useVoiceCall(tenantId: string | null, token: string | null) {
     } catch {
       return false;
     }
-  }, [sendUserText]);
+  }, [releaseMicStream, sendUserText]);
 
-  const beginHoldMedia = useCallback(() => {
-    const stream = mediaStreamRef.current;
+  const beginHoldMedia = useCallback(async () => {
     const ws = wsRef.current;
-    if (!stream || !ws || ws.readyState !== WebSocket.OPEN || !activeRef.current) return false;
+    if (!ws || ws.readyState !== WebSocket.OPEN || !activeRef.current) return false;
     if (mutedRef.current || playingRef.current) return false;
+
+    let stream: MediaStream;
+    try {
+      stream = await ensureMicStream();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Impossible d'accéder au micro.");
+      return false;
+    }
+
+    if (!activeRef.current || mutedRef.current || playingRef.current || wsRef.current !== ws) return false;
 
     const mime = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
       ? "audio/webm;codecs=opus"
@@ -575,7 +620,9 @@ export function useVoiceCall(tenantId: string | null, token: string | null) {
     const recorder = new MediaRecorder(stream, { mimeType: mime });
     mediaRecorderRef.current = recorder;
 
-    const audioCtx = new AudioContext();
+    // Reuse the context unlocked by the call button; a new context can remain
+    // suspended and make the silence detector read zeros forever.
+    const audioCtx = await ensureAudioCtx();
     const sourceNode = audioCtx.createMediaStreamSource(stream);
     const analyser = audioCtx.createAnalyser();
     analyser.fftSize = 512;
@@ -585,12 +632,14 @@ export function useVoiceCall(tenantId: string | null, token: string | null) {
     let speaking = false;
     let silenceMs = 0;
     let heardMs = 0;
+    let lastSpeechAt = performance.now();
     let alive = true;
     const startedAt = performance.now();
 
     const teardownMeter = () => {
       alive = false;
-      void audioCtx.close().catch(() => undefined);
+      sourceNode.disconnect();
+      analyser.disconnect();
     };
 
     const stopAndSend = () => {
@@ -606,7 +655,7 @@ export function useVoiceCall(tenantId: string | null, token: string | null) {
     };
 
     const tick = () => {
-      if (!alive || !activeRef.current || mutedRef.current || playingRef.current) {
+      if (!alive || recorder.state === "inactive" || !activeRef.current || mutedRef.current || playingRef.current) {
         stopAndSend();
         return;
       }
@@ -619,7 +668,8 @@ export function useVoiceCall(tenantId: string | null, token: string | null) {
       const rms = Math.sqrt(sum / samples.length);
       const elapsed = performance.now() - startedAt;
 
-      if (rms > 0.045) {
+      if (rms > 0.012) {
+        lastSpeechAt = performance.now();
         speaking = true;
         heardMs += 80;
         silenceMs = 0;
@@ -628,7 +678,7 @@ export function useVoiceCall(tenantId: string | null, token: string | null) {
         silenceMs += 80;
       }
 
-      if ((speaking && silenceMs >= SILENCE_MS && heardMs >= 200) || elapsed > 10000) {
+      if ((speaking && silenceMs >= SILENCE_MS && heardMs >= 200) || elapsed > 12000) {
         stopAndSend();
         return;
       }
@@ -646,33 +696,36 @@ export function useVoiceCall(tenantId: string | null, token: string | null) {
       mediaRecorderRef.current = null;
       holdModeRef.current = null;
       setHolding(false);
-      if (!chunks.length || !activeRef.current || ws.readyState !== WebSocket.OPEN) return;
+      if (!chunks.length || !activeRef.current || mutedRef.current || wsRef.current !== ws || ws.readyState !== WebSocket.OPEN) return;
       if (!speaking) {
-        setInterim("● À l'écoute…");
+        setInterim("● Micro actif — parlez maintenant");
         window.setTimeout(() => startContinuousListenRef.current(), RESUME_MS);
         return;
       }
       const blob = new Blob(chunks, { type: mimeRef.current });
-      if (blob.size < 1500) {
+      if (blob.size < 800) {
         window.setTimeout(() => startContinuousListenRef.current(), RESUME_MS);
         return;
       }
       setState("thinking");
       setInterim("Transcription…");
-      void blobToWav(blob)
+      const turnId = beginTurn(lastSpeechAt, "audio");
+      // Both server providers decode WebM/Opus directly. Avoid decoding,
+      // resampling and uploading a larger WAV before transcription can start.
+      void blob.arrayBuffer()
         .then((buf) => {
           if (!activeRef.current || ws.readyState !== WebSocket.OPEN) return;
           ws.send(buf);
-          ws.send(JSON.stringify({ type: "audio_end" }));
+          ws.send(JSON.stringify({ type: "audio_end", turn_id: turnId }));
+          markSent(turnId);
           setInterim("");
         })
         .catch(() => {
-          void blob.arrayBuffer().then((buf) => {
-            if (!activeRef.current || ws.readyState !== WebSocket.OPEN) return;
-            ws.send(buf);
-            ws.send(JSON.stringify({ type: "audio_end" }));
-            setInterim("");
-          });
+          setError("Impossible de lire l'enregistrement audio. Réessayez.");
+          responsePendingRef.current = false;
+          setInterim("");
+          setState("listening");
+          window.setTimeout(() => startContinuousListenRef.current(), RESUME_MS);
         });
     };
 
@@ -680,7 +733,7 @@ export function useVoiceCall(tenantId: string | null, token: string | null) {
       recorder.start(250);
       holdModeRef.current = "media";
       setHolding(true);
-      setInterim("● À l'écoute… parlez naturellement");
+      setInterim("● Micro actif — parlez maintenant");
       window.setTimeout(tick, 80);
       return true;
     } catch (err) {
@@ -688,16 +741,28 @@ export function useVoiceCall(tenantId: string | null, token: string | null) {
       setError(err instanceof Error ? err.message : "Impossible de démarrer le micro.");
       return false;
     }
-  }, []);
+  }, [beginTurn, ensureAudioCtx, ensureMicStream, markSent]);
 
   const startContinuousListen = useCallback(() => {
-    if (!activeRef.current || mutedRef.current || playingRef.current) return;
-    if (holdModeRef.current) return;
-    setError(null);
-    const ok = serverSttRef.current
-      ? beginHoldMedia()
-      : beginHoldSpeech() || beginHoldMedia();
-    if (!ok) setError("Micro indisponible pour l'écoute continue.");
+    if (!activeRef.current || mutedRef.current || playingRef.current || responsePendingRef.current) return;
+    if (holdModeRef.current || captureStartingRef.current) return;
+    captureStartingRef.current = true;
+    void (async () => {
+      try {
+        if (serverSttRef.current) {
+          const mediaOk = await beginHoldMedia();
+          if (!mediaOk && activeRef.current) setError("Micro indisponible pour l'écoute continue.");
+          return;
+        }
+        if (beginHoldSpeech()) return;
+        const mediaOk = await beginHoldMedia();
+        if (!mediaOk && activeRef.current) setError("Micro indisponible pour l'écoute continue.");
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "Impossible de démarrer le micro.");
+      } finally {
+        captureStartingRef.current = false;
+      }
+    })();
   }, [beginHoldMedia, beginHoldSpeech]);
 
   startContinuousListenRef.current = startContinuousListen;
@@ -714,6 +779,7 @@ export function useVoiceCall(tenantId: string | null, token: string | null) {
     }
 
     cleanupSession("connecting");
+    setDebugTurns([]);
     setError(null);
     setTranscript([]);
     setSources([]);
@@ -729,6 +795,10 @@ export function useVoiceCall(tenantId: string | null, token: string | null) {
         },
       });
       mediaStreamRef.current = stream;
+      // Keep the stream only for MediaRecorder fallback. Web Speech needs the mic free.
+      if (getSpeechRecognition()) {
+        releaseMicStream();
+      }
 
       try {
         await ensureAudioCtx();
@@ -750,7 +820,9 @@ export function useVoiceCall(tenantId: string | null, token: string | null) {
         if (!isCurrentSocket()) return;
         if (typeof ev.data !== "string") {
           if (ttsReceivingRef.current) {
-            ttsChunksRef.current.push(new Uint8Array(ev.data as ArrayBuffer));
+            const timing = turnTimingRef.current;
+            if (timing && timing.firstAudioAt === undefined) timing.firstAudioAt = performance.now();
+            streamPlayerRef.current?.push(ev.data as ArrayBuffer);
           }
           return;
         }
@@ -758,6 +830,16 @@ export function useVoiceCall(tenantId: string | null, token: string | null) {
         try {
           msg = JSON.parse(ev.data);
         } catch {
+          return;
+        }
+        const debugId = String(msg.turn_id || "");
+        if (debugId) updateDebug(debugId, { callId: String(msg.call_id || ""), traceId: String(msg.trace_id || "") });
+        if (msg.type === "debug_timing") {
+          const duration = Number(msg.duration_ms);
+          const offset = Number(msg.offset_ms);
+          if (Number.isFinite(duration) && duration >= 0 && Number.isFinite(offset) && offset >= 0) {
+            updateDebug(debugId, { stages: { [String(msg.stage)]: { duration, offset, failed: Boolean(msg.failed) } } });
+          }
           return;
         }
         if (msg.type === "ready") {
@@ -770,6 +852,12 @@ export function useVoiceCall(tenantId: string | null, token: string | null) {
           window.setTimeout(() => startContinuousListenRef.current(), RESUME_MS);
         }
         if (msg.type === "tts_start") {
+          if (typeof msg.server_first_audio_ms === "number") updateDebug(debugId, { serverFirstAudio: msg.server_first_audio_ms });
+          stopThinkingPhrase();
+          streamPlayerRef.current?.stop();
+          const player = new StreamingAudio(() => reportPlayback(String(msg.turn_id || "")));
+          streamPlayerRef.current = player;
+          playingRef.current = true;
           ttsReceivingRef.current = true;
           ttsChunksRef.current = [];
           usedSpeakEventsRef.current = true;
@@ -781,11 +869,34 @@ export function useVoiceCall(tenantId: string | null, token: string | null) {
           return;
         }
         if (msg.type === "tts_end") {
-          void flushTtsChunks();
+          const player = streamPlayerRef.current;
+          ttsReceivingRef.current = false;
+          if (player) void player.end().catch((err: Error) => {
+            updateDebug(debugId, { status: "error", error: err.message });
+            if (streamPlayerRef.current === player) setError(err.message);
+          }).finally(() => {
+            if (streamPlayerRef.current !== player) return;
+            streamPlayerRef.current = null;
+            playingRef.current = false;
+            speakBusyRef.current = false;
+            if (!activeRef.current) return;
+            setState(responsePendingRef.current ? "thinking" : "listening");
+            window.setTimeout(() => startContinuousListenRef.current(), RESUME_MS);
+          });
+          return;
+        }
+        if (msg.type === "tts_abort") {
+          streamPlayerRef.current?.stop();
+          streamPlayerRef.current = null;
+          playingRef.current = false;
+          speakBusyRef.current = false;
+          usedSpeakEventsRef.current = false;
+          ttsReceivingRef.current = false;
           return;
         }
         if (msg.type === "status") {
           const s = msg.state as VoiceState | undefined;
+          if (s === "listening") responsePendingRef.current = false;
           if (
             s === "listening" &&
             (playingRef.current ||
@@ -817,6 +928,17 @@ export function useVoiceCall(tenantId: string | null, token: string | null) {
           }
         }
         if (msg.type === "speak") {
+          stopThinkingPhrase();
+          if (msg.engine === "browser") {
+            const socket = ws;
+            speakBusyRef.current = true;
+            void speakBrowser(String(msg.text || "")).finally(() => {
+              if (wsRef.current !== socket) return;
+              speakBusyRef.current = false;
+              window.setTimeout(() => startContinuousListenRef.current(), RESUME_MS);
+            });
+            return;
+          }
           // HTTP fallback only when server could not stream WS audio
           const text = String(msg.text || "");
           if (text && !ttsReceivingRef.current && !usedSpeakEventsRef.current) {
@@ -849,6 +971,9 @@ export function useVoiceCall(tenantId: string | null, token: string | null) {
           setSources((msg.items as Source[]) || []);
         }
         if (msg.type === "error") {
+          updateDebug(debugId, { status: "error", error: String(msg.message || "Erreur vocale") });
+          stopThinkingPhrase();
+          responsePendingRef.current = false;
           ttsReceivingRef.current = false;
           ttsChunksRef.current = [];
           setError(String(msg.message || "Erreur vocale"));
@@ -866,17 +991,14 @@ export function useVoiceCall(tenantId: string | null, token: string | null) {
             setElapsed(Math.floor((Date.now() - startedAtRef.current) / 1000));
           }
         }, 500);
-        window.setTimeout(() => {
-          if (!isCurrentSocket() || ws.readyState !== WebSocket.OPEN) return;
-          setState((prev) => (prev === "connecting" ? "listening" : prev));
-        }, 2000);
+        // Capture starts only after "ready" selects the transcription provider.
       };
 
       ws.onerror = () => {
         if (!isCurrentSocket()) return;
         if (!opened) {
           setError(
-            "Connexion vocale impossible. Vérifiez que l'API tourne (port 8001).",
+            "Connexion vocale impossible. Vérifiez que l'API tourne (port 8000).",
           );
           cleanupSession("error");
         }
@@ -896,11 +1018,13 @@ export function useVoiceCall(tenantId: string | null, token: string | null) {
       setError(message);
       cleanupSession("error");
     }
-  }, [cleanupSession, ensureAudioCtx, enqueueSpeak, flushTtsChunks, pauseRecognition, tenantId, token]);
+  }, [cleanupSession, ensureAudioCtx, enqueueSpeak, pauseRecognition, releaseMicStream, reportPlayback, speakBrowser, stopThinkingPhrase, tenantId, token, updateDebug]);
 
   useEffect(() => {
     return () => {
       activeRef.current = false;
+      streamPlayerRef.current?.stop();
+      stopThinkingPhrase();
       try {
         recognitionRef.current?.abort();
       } catch {
@@ -909,7 +1033,7 @@ export function useVoiceCall(tenantId: string | null, token: string | null) {
       mediaStreamRef.current?.getTracks().forEach((t) => t.stop());
       wsRef.current?.close();
     };
-  }, []);
+  }, [stopThinkingPhrase]);
 
   useEffect(() => {
     if (!activeRef.current) return;
@@ -940,6 +1064,7 @@ export function useVoiceCall(tenantId: string | null, token: string | null) {
   }, [muted, state]);
 
   return {
+    debugTurns,
     state,
     muted,
     setMuted,

@@ -27,15 +27,19 @@ class EdgeTtsProvider(TtsProvider):
         self.voice = voice
 
     async def synthesize(self, text: str) -> bytes:
+        return b"".join([chunk async for chunk in self.synthesize_stream(text)])
+
+    async def synthesize_stream(self, text: str) -> AsyncIterator[bytes]:
         import edge_tts
 
         # Natural French pacing for call-center replies
-        communicate = edge_tts.Communicate(text, self.voice, rate="+5%", pitch="+0Hz")
-        chunks: list[bytes] = []
+        communicate = edge_tts.Communicate(
+            text, self.voice, rate="+5%", pitch="+0Hz",
+            connect_timeout=5, receive_timeout=10,
+        )
         async for chunk in communicate.stream():
             if chunk["type"] == "audio":
-                chunks.append(chunk["data"])
-        return b"".join(chunks)
+                yield chunk["data"]
 
 
 @lru_cache

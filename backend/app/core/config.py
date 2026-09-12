@@ -19,6 +19,9 @@ class Settings(BaseSettings):
     local_embedding_model: str = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
 
     deepgram_api_key: str = ""
+    # Local STT: tiny | base | small (CPU). base is much faster than small for short turns.
+    whisper_model: str = "base"
+    whisper_cpu_threads: int = 4
     elevenlabs_api_key: str = ""
     elevenlabs_voice_id: str = ""
     # Neural French voice (Microsoft edge-tts)

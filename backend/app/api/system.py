@@ -47,4 +47,4 @@ async def recent_metrics():
     settings = get_settings()
     if settings.app_env == "production":
         raise HTTPException(status_code=404, detail="Not found")
-    return {"samples": latency_store.recent(50)}
+    return {"samples": latency_store.recent(50), "percentiles": latency_store.percentiles()}

@@ -55,11 +55,26 @@ async def lifespan(app: FastAPI):
             logger.exception("Embedding warm-up failed")
 
     warm_task = asyncio.create_task(_warm_embeddings())
+    async def _warm_voice() -> None:
+        try:
+            from app.services.voice.stt import warm_stt
+
+            await warm_stt()
+            logger.info("Speech recognition ready")
+        except Exception:
+            logger.exception("Speech recognition warm-up failed")
+
+    voice_warm_task = asyncio.create_task(_warm_voice())
     task = asyncio.create_task(_cleanup_loop())
     logger.info("Voice AI Support API starting (env=%s)", settings.app_env)
     yield
     warm_task.cancel()
+    voice_warm_task.cancel()
     task.cancel()
+    try:
+        await voice_warm_task
+    except asyncio.CancelledError:
+        pass
     try:
         await warm_task
     except asyncio.CancelledError:

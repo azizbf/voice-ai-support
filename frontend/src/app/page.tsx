@@ -12,6 +12,7 @@ import {
   type TenantStatus,
 } from "@/lib/api";
 import { useVoiceCall } from "@/hooks/useVoiceCall";
+import { VoiceDebugPanel } from "@/components/VoiceDebugPanel";
 
 function formatTimer(seconds: number): string {
   const m = Math.floor(seconds / 60)
@@ -471,7 +472,7 @@ export default function HomePage() {
                   )}
                   {voice.state === "listening" && (
                     <p className="text-sm text-soft">
-                      En appel — parlez librement, l&apos;agent répond quand vous faites une pause.
+                      Micro actif — parlez, puis faites une courte pause. Utilisez Chrome ou Edge.
                     </p>
                   )}
                   {voice.state === "thinking" && (
@@ -504,6 +505,8 @@ export default function HomePage() {
                   </div>
                 </div>
               )}
+
+              <VoiceDebugPanel turns={voice.debugTurns} />
 
               <div className="mt-3 flex flex-wrap gap-2">
                 <button

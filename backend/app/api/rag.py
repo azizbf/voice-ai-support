@@ -1,4 +1,5 @@
-from __future__ import annotations
+# Keep runtime annotations: SlowAPI wraps these endpoints, and postponed
+# request-model annotations are otherwise resolved in the wrapper's module.
 
 import json
 

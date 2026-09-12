@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from pathlib import Path
+from functools import lru_cache
+import asyncio
 
 import faiss
 import numpy as np
@@ -50,6 +52,16 @@ class FaissVectorStore(VectorStore):
     def _load(self, tenant_id: str) -> tuple[faiss.Index, list[ChunkRecord]]:
         if not self.exists(tenant_id):
             raise FileNotFoundError(f"No index for tenant {tenant_id}")
+        index_stat = self._index_path(tenant_id).stat()
+        meta_stat = self._meta_path(tenant_id).stat()
+        return self._load_version(tenant_id, (index_stat.st_mtime_ns, index_stat.st_size,
+                                             meta_stat.st_mtime_ns, meta_stat.st_size))
+
+    async def preload(self, tenant_id: str) -> None:
+        await asyncio.to_thread(self._load, tenant_id)
+
+    @lru_cache(maxsize=16)
+    def _load_version(self, tenant_id: str, version: tuple[int, ...]) -> tuple[faiss.Index, list[ChunkRecord]]:
         index = faiss.read_index(str(self._index_path(tenant_id)))
         chunks: list[ChunkRecord] = []
         with self._meta_path(tenant_id).open("r", encoding="utf-8") as f:
@@ -76,6 +88,7 @@ class FaissVectorStore(VectorStore):
         return results
 
     async def delete_tenant(self, tenant_id: str) -> None:
+        self._load_version.cache_clear()
         for path in (self._index_path(tenant_id), self._meta_path(tenant_id)):
             if path.exists():
                 path.unlink()

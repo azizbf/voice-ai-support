@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import timezone
+from typing import Annotated
 
 from fastapi import APIRouter, File, Header, HTTPException, Request, UploadFile
 
@@ -83,7 +84,7 @@ async def get_tenant_status(
 async def upload_document(
     request: Request,
     tenant_id: str,
-    file: UploadFile = File(...),
+    file: Annotated[UploadFile, File(...)],
     x_tenant_token: str | None = Header(default=None),
 ) -> DocumentUploadResponse:
     require_tenant_auth(tenant_id, x_tenant_token)
