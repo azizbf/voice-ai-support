@@ -6,6 +6,7 @@ from uuid import uuid4
 
 from sqlalchemy import DateTime, Float, ForeignKey, Integer, String, Text, func
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+from pgvector.sqlalchemy import Vector
 
 
 class Base(DeclarativeBase):
@@ -58,6 +59,7 @@ class ChunkRow(Base):
     content: Mapped[str] = mapped_column(Text)
     token_estimate: Mapped[int] = mapped_column(Integer, default=0)
     faiss_row: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    embedding: Mapped[Optional[list[float]]] = mapped_column(Vector(384), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     document: Mapped[DocumentRow] = relationship(back_populates="chunks")

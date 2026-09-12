@@ -17,8 +17,9 @@ from app.models.schemas import (
 from app.services.pdf.extractor import PdfValidationError, extract_pdf, validate_pdf_bytes
 from app.services.rag.chunking import chunk_pages
 from app.services.rag.embeddings import get_embedding_provider
+from app.services.rag.query import lexical_needles, normalize_query
 from app.services.session.service import session_service
-from app.services.vectorstore.faiss_store import FaissVectorStore
+from app.services.vectorstore.factory import get_vector_store
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +30,8 @@ Tu utilises UNIQUEMENT la base de connaissances fournie comme source de vérité
 Quand un tarif, une procédure ou une politique apparaît dans le contexte, tu le donnes
 directement et précisément (ex: prix en DT, délais, étapes) — ne dis PAS que tu n'as pas
 l'information si elle est présente.
+Questions forfait / Fibre 50, 100 ou 300: si le contexte contient « Forfaits Fibre » ou un
+prix en DT, cite le prix mensuel, les frais de mise en service et l'engagement. N'escalade pas.
 Pour les procédures guidées (réinitialisation routeur, diagnostic panne, etc.):
 donne UNE seule étape à la fois, demande au client de confirmer quand c'est fait,
 puis passe à l'étape suivante seulement après sa confirmation. Ne récite jamais toute
@@ -42,7 +45,10 @@ Réponds toujours en français."""
 class RagService:
     def __init__(self) -> None:
         self.settings = get_settings()
-        self.store = FaissVectorStore()
+
+    @property
+    def store(self):
+        return get_vector_store()
 
     async def ingest_pdf(self, tenant_id: str, filename: str, data: bytes) -> DocumentInfo:
         validate_pdf_bytes(data, filename)
@@ -155,14 +161,15 @@ class RagService:
         )
         from app.db.repository import db_log_usage, db_save_document_with_chunks
 
-        await db_save_document_with_chunks(
-            tenant_id=tenant_id,
-            doc_id=doc_id,
-            original_name=filename,
-            safe_name=safe_name,
-            page_count=page_count,
-            chunks=chunks,
-        )
+        if not getattr(self.store, "persists_chunks", False):
+            await db_save_document_with_chunks(
+                tenant_id=tenant_id,
+                doc_id=doc_id,
+                original_name=filename,
+                safe_name=safe_name,
+                page_count=page_count,
+                chunks=chunks,
+            )
         await db_log_usage(
             tenant_id,
             "upload",
@@ -173,19 +180,31 @@ class RagService:
 
     async def retrieve(self, tenant_id: str, query: str, top_k: int | None = None) -> tuple[list[RetrievedChunk], float]:
         meta = await session_service.load_meta(tenant_id)
-        if meta is None or meta.status != "ready" or not self.store.exists(tenant_id):
+        if meta is None or meta.status != "ready":
             raise ValueError("La base de connaissances n'est pas prête pour ce tenant.")
+        if not await self.store.exists(tenant_id):
+            backfill = getattr(self.store, "backfill_missing_embeddings", None)
+            if callable(backfill):
+                await backfill(tenant_id)
+        if not await self.store.exists(tenant_id):
+            raise ValueError(
+                "La base de connaissances n'est pas prête pour ce tenant. "
+                "Démarrez une nouvelle session pour réindexer."
+            )
 
-        k = top_k or self.settings.rag_top_k
+        query = normalize_query(query)
+        k = max(top_k or self.settings.rag_top_k, 4)
         embedder = get_embedding_provider()
         with timed() as t:
             qvec = await embedder.embed_query(query)
             scored = await self.store.search(tenant_id, qvec[0], k)
 
         chunks: list[RetrievedChunk] = []
+        seen: set[str] = set()
         for item in scored:
             if item.score < self.settings.rag_min_score:
                 continue
+            seen.add(item.chunk.chunk_id)
             chunks.append(
                 RetrievedChunk(
                     chunk_id=item.chunk.chunk_id,
@@ -195,6 +214,25 @@ class RagService:
                     score=item.score,
                 )
             )
+
+        needles = lexical_needles(query)
+        if needles:
+            from app.db.repository import db_keyword_chunks
+
+            for row in await db_keyword_chunks(tenant_id, needles):
+                if row.id in seen:
+                    continue
+                seen.add(row.id)
+                chunks.append(
+                    RetrievedChunk(
+                        chunk_id=row.id,
+                        document_name=row.document_name,
+                        page=row.page,
+                        text=row.content,
+                        score=0.55,
+                    )
+                )
+        chunks.sort(key=lambda c: c.score, reverse=True)
         return chunks, t["elapsed_ms"]
 
     def format_context(self, chunks: list[RetrievedChunk]) -> str:

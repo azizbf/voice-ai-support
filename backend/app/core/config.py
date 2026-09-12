@@ -37,7 +37,7 @@ class Settings(BaseSettings):
     rate_limit_chat: str = "30/minute"
     rate_limit_voice: str = "20/minute"
     demo_signing_secret: str = "change-me-in-production"
-    rag_top_k: int = 3
+    rag_top_k: int = 4
     rag_min_score: float = 0.25
     chunk_size_chars: int = 1800
     chunk_overlap_chars: int = 300
@@ -46,6 +46,9 @@ class Settings(BaseSettings):
     database_url: str = ""
     # Example: postgresql+asyncpg://postgres:postgres@localhost:5432/vantage_ai
     dashboard_api_key: str = "dev-dashboard-key"
+    # auto = pgvector when DATABASE_URL is set, otherwise FAISS files
+    vector_store: str = "auto"  # auto | pgvector | faiss
+    embedding_dimensions: int = 384
 
     @property
     def cors_origin_list(self) -> list[str]:

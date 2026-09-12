@@ -5,7 +5,7 @@ import logging
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, or_, select
 
 from app.db.models import (
     ChunkRow,
@@ -59,6 +59,7 @@ async def db_save_document_with_chunks(
     safe_name: str,
     page_count: int,
     chunks: list[Any],
+    vectors: Any | None = None,
 ) -> None:
     if not postgres_ready():
         return
@@ -83,6 +84,9 @@ async def db_save_document_with_chunks(
             )
             db.add(doc)
             for i, chunk in enumerate(chunks):
+                embedding = None
+                if vectors is not None:
+                    embedding = [float(x) for x in vectors[i]]
                 db.add(
                     ChunkRow(
                         id=chunk.chunk_id,
@@ -93,6 +97,7 @@ async def db_save_document_with_chunks(
                         content=chunk.text,
                         token_estimate=chunk.token_estimate,
                         faiss_row=i,
+                        embedding=embedding,
                     )
                 )
             tenant = await db.get(TenantRow, tenant_id)
@@ -101,6 +106,7 @@ async def db_save_document_with_chunks(
                 tenant.status_detail = "Prêt"
     except Exception:
         logger.exception("db_save_document_with_chunks failed")
+        raise
 
 
 async def db_clear_tenant_knowledge(tenant_id: str) -> None:
@@ -291,3 +297,19 @@ async def db_tenant_detail(tenant_id: str) -> dict[str, Any] | None:
                 for m in msgs
             ],
         }
+
+
+async def db_keyword_chunks(tenant_id: str, needles: list[str], limit: int = 6) -> list[ChunkRow]:
+    if not postgres_ready() or not needles:
+        return []
+    safe = [n.strip() for n in needles if n and len(n.strip()) >= 2 and "%" not in n and "_" not in n]
+    if not safe:
+        return []
+    async with session_scope() as db:
+        conds = [ChunkRow.content.ilike(f"%{n}%") for n in safe]
+        rows = (
+            await db.execute(
+                select(ChunkRow).where(ChunkRow.tenant_id == tenant_id).where(or_(*conds)).limit(limit)
+            )
+        ).scalars().all()
+        return list(rows)

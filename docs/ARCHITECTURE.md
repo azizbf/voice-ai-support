@@ -5,7 +5,7 @@
 Browser demo for Tunisian French-speaking call centers:
 
 1. Upload a company PDF FAQ/procedure document.
-2. Process once into a tenant-scoped RAG knowledge base (FAISS).
+2. Process once into a tenant-scoped RAG knowledge base (pgvector, FAISS fallback).
 3. Start a voice call in the browser.
 4. Speak to a Claude-powered French support agent grounded only in that KB.
 5. See live transcript and document/page citations.
@@ -18,7 +18,7 @@ Browser demo for Tunisian French-speaking call centers:
 | Backend | FastAPI, Python 3.11+ |
 | LLM | Anthropic Claude (streaming) |
 | Embeddings | Voyage AI if `VOYAGE_API_KEY`, else local `sentence-transformers` |
-| Vector store | FAISS behind `VectorStore` abstraction |
+| Vector store | pgvector in PostgreSQL (FAISS files if Postgres is down) |
 | STT | Deepgram streaming if key set, else `faster-whisper` |
 | TTS | ElevenLabs streaming if key set, else `edge-tts` |
 | Voice transport | Browser mic + WebSocket audio/events pipeline |
@@ -28,7 +28,7 @@ Anthropic has no speech-to-speech Realtime API and no embeddings API. Voice is a
 ## High-level flow
 
 ```
-PDF upload → extract (pages) → clean → chunk → embed → FAISS persist (once)
+PDF upload → extract (pages) → clean → chunk → embed → pgvector persist (once)
                                                               │
 Customer speech → STT → retrieve(tenant) → Claude stream → TTS stream → speaker
                               │                              │
@@ -37,7 +37,7 @@ Customer speech → STT → retrieve(tenant) → Claude stream → TTS stream �
 
 ## Multi-tenancy
 
-Every demo session creates a `tenant_id` (UUID). Indexes, uploads, metadata, and retrieval are strictly scoped to that ID. Cross-tenant search is impossible by construction (separate FAISS files + metadata filter + assert).
+Every demo session creates a `tenant_id` (UUID). Indexes, uploads, metadata, and retrieval are strictly scoped to that ID. Cross-tenant search is impossible by construction (`WHERE tenant_id = …` on pgvector, or separate FAISS files).
 
 ## RAG contract
 
@@ -63,7 +63,7 @@ Every demo session creates a `tenant_id` (UUID). Indexes, uploads, metadata, and
 
 ## Extension points
 
-- Replace `FaissVectorStore` with pgvector / Pinecone / Qdrant.
+- Swap `VECTOR_STORE=faiss` to force on-disk indexes.
 - Swap STT/TTS providers via service interfaces.
 - Add Twilio/SIP media bridge on the same Claude+RAG core.
 - Company dashboards, billing meters, CRM webhooks, Tunisian Arabic locale packs.

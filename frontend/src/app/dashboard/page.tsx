@@ -102,8 +102,8 @@ export default function DashboardPage() {
         <div className="mt-8">
           <h1 className="font-display text-3xl font-semibold text-ink">Operations console</h1>
           <p className="mt-2 max-w-2xl text-soft">
-            PostgreSQL holds tenants, documents, chunks metadata, conversations and messages.
-            Vectors remain in FAISS per tenant for now (pgvector-ready later).
+            PostgreSQL holds tenants, documents, chunk text, embeddings (pgvector), conversations
+            and messages. FAISS files are used only if Postgres is unavailable.
           </p>
         </div>
 
@@ -124,7 +124,11 @@ export default function DashboardPage() {
             <p className="mt-2 font-display text-2xl font-semibold text-ink">
               {(status?.vector_store || "faiss").toUpperCase()}
             </p>
-            <p className="mt-1 text-xs text-soft">Per-tenant index on disk</p>
+            <p className="mt-1 text-xs text-soft">
+              {(status?.vector_store || "faiss") === "pgvector"
+                ? "Embeddings in PostgreSQL"
+                : "Per-tenant index on disk"}
+            </p>
           </div>
           <div className="glass rounded-3xl p-5">
             <p className="text-xs font-semibold uppercase tracking-wide text-soft">Ready tenants</p>

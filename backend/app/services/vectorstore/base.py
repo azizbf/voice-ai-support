@@ -15,6 +15,8 @@ class ScoredChunk:
 
 
 class VectorStore(ABC):
+    name = "vectorstore"
+    persists_chunks = False
     @abstractmethod
     async def upsert(self, tenant_id: str, chunks: list[ChunkRecord], vectors: np.ndarray) -> None:
         raise NotImplementedError
@@ -28,5 +30,8 @@ class VectorStore(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def exists(self, tenant_id: str) -> bool:
+    async def exists(self, tenant_id: str) -> bool:
         raise NotImplementedError
+
+    async def preload(self, tenant_id: str) -> None:
+        return None

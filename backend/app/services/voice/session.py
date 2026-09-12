@@ -30,11 +30,14 @@ _SENTENCE_END = re.compile(r"^(.+?[.!?…])(?:\s+|$)")
 
 
 def _speech_prefix(buffer: str) -> str | None:
-    """Only split at completed punctuation boundaries, never inside numbers."""
+    """Flush the first speakable clause as soon as it is stable."""
     for match in re.finditer(r"[.!?…;:,](?=\s)", buffer):
         prefix = buffer[:match.end()].strip()
-        if len(prefix) >= 24 and len(prefix.split()) >= 4:
+        if len(prefix) >= 12 and len(prefix.split()) >= 3:
             return prefix
+    words = buffer.split()
+    if len(words) >= 6 and (buffer.endswith(" ") or len(words) > 6):
+        return " ".join(words[:6])
     return None
 
 
@@ -94,18 +97,21 @@ class VoiceSession:
 
         async def retrieve():
             async with asyncio.timeout(3):
-                return await rag_service.retrieve(self.tenant_id, self._retrieval_query(text), top_k=2)
+                return await rag_service.retrieve(self.tenant_id, self._retrieval_query(text), top_k=4)
 
         self.prefetch_task = asyncio.create_task(retrieve())
         self.prefetch_task.add_done_callback(lambda task: task.exception() if not task.cancelled() else None)
 
     def _retrieval_query(self, transcript: str) -> str:
-        """Keep procedure context when the user only confirms a step."""
-        words = transcript.split()
-        if len(words) <= 10 and self.history:
-            prior = " ".join(m["content"] for m in self.history[-4:])
-            return f"{prior}\nMessage client: {transcript}"
-        return transcript
+        """Keep procedure context only for short confirmations, not topic changes."""
+        from app.services.rag.query import is_followup, normalize_query
+
+        text = normalize_query(transcript)
+        if is_followup(text) and self.history:
+            last_user = next((m["content"] for m in reversed(self.history) if m["role"] == "user"), "")
+            if last_user:
+                return f"{normalize_query(last_user)}\n{text}"
+        return text
 
     def _claude_messages(self, transcript: str, context: str) -> list[dict[str, str]]:
         messages: list[dict[str, str]] = list(self.history[-4:])
@@ -117,7 +123,8 @@ class VoiceSession:
                     f"Client: {transcript}\n\n"
                     "Réponds à l'oral, français. Commence directement par une phrase "
                     "utile de 6 à 12 mots, sans introduction. Au maximum deux phrases courtes. "
-                    "Procédure: une étape + confirmation. Prix: cite-le."
+                    "Procédure: une étape + confirmation. Prix: cite le montant en DT. "
+                    "N'escalade pas si un forfait ou un tarif est dans le contexte KB."
                 ),
             }
         )
@@ -128,10 +135,10 @@ class VoiceSession:
         if not chunks:
             return "Aucune information pertinente."
         parts: list[str] = []
-        for i, c in enumerate(chunks[:2], start=1):
+        for i, c in enumerate(chunks[:4], start=1):
             text = c.text.strip()
-            if len(text) > 450:
-                text = text[:450].rsplit(" ", 1)[0] + "…"
+            if len(text) > 700:
+                text = text[:700].rsplit(" ", 1)[0] + "…"
             parts.append(f"[{i}|p.{c.page}] {text}")
         return "\n".join(parts)
 
@@ -199,6 +206,15 @@ class VoiceSession:
                     raise PartialSpeechError("La lecture a été interrompue. La réponse complète reste affichée.") from exc
             raise
 
+    async def _prime_tts(self) -> None:
+        prime = getattr(get_tts_provider(), "prime", None)
+        if not callable(prime):
+            return
+        try:
+            await prime()
+        except Exception:
+            logger.debug("TTS prime skipped", exc_info=True)
+
     async def interrupt(self) -> None:
         self.cancel_event.set()
         if self._response_task and not self._response_task.done():
@@ -248,6 +264,16 @@ class VoiceSession:
                 await self._response_task
         except asyncio.CancelledError:
             pass
+        except TimeoutError:
+            logger.exception("Voice audio processing timed out")
+            await self.send_json(
+                {"type": "error", "message": "La réponse prend trop de temps. Veuillez réessayer."}
+            )
+            await self.send_json({"type": "status", "state": "listening"})
+        except ValueError as exc:
+            logger.warning("Voice turn rejected: %s", exc)
+            await self.send_json({"type": "error", "message": str(exc)})
+            await self.send_json({"type": "status", "state": "listening"})
         except Exception:
             logger.exception("Voice audio processing failed")
             await self.send_json({"type": "error", "message": "Transcription audio impossible. Vérifiez le service vocal puis réessayez."})
@@ -280,7 +306,7 @@ class VoiceSession:
 
         speech_end_to_retrieval = (time.perf_counter() - t0) * 1000
         retrieve_q = self._retrieval_query(transcript)
-        async with self.debug_stage("retrieval", t0), asyncio.timeout(3):
+        async with self.debug_stage("retrieval", t0), asyncio.timeout(10):
             prefetched = self.prefetch_task
             self.prefetch_task = None
             matches = self.prefetch_text == transcript
@@ -289,11 +315,11 @@ class VoiceSession:
                 try:
                     chunks, retrieval_ms = await prefetched
                 except Exception:
-                    chunks, retrieval_ms = await rag_service.retrieve(self.tenant_id, retrieve_q, top_k=2)
+                    chunks, retrieval_ms = await rag_service.retrieve(self.tenant_id, retrieve_q, top_k=4)
             else:
                 if prefetched:
                     prefetched.cancel()
-                chunks, retrieval_ms = await rag_service.retrieve(self.tenant_id, retrieve_q, top_k=2)
+                chunks, retrieval_ms = await rag_service.retrieve(self.tenant_id, retrieve_q, top_k=4)
         sources = rag_service.to_sources(chunks)
         await self.send_json({"type": "sources", "items": [s.model_dump() for s in sources]})
 
@@ -313,6 +339,7 @@ class VoiceSession:
         llm_started = time.perf_counter()
         phrase_started = llm_started
 
+        tts_prime = asyncio.create_task(self._prime_tts())
         try:
             async with claude_service.client.with_options(timeout=8.0, max_retries=0).messages.stream(
                 model=voice_model,
@@ -337,6 +364,7 @@ class VoiceSession:
                         await self.debug_timing("llm_phrase", phrase_started, t0)
                         tts_task = asyncio.create_task(self._stream_phrases(phrases, t0))
         except BaseException:
+            tts_prime.cancel()
             await self.debug_timing("llm_wait" if first_token_ms is None else "llm_phrase", llm_started if first_token_ms is None else phrase_started, t0, failed=True)
             if tts_task is not None:
                 tts_task.cancel()
@@ -441,9 +469,7 @@ async def voice_websocket_loop(websocket: WebSocket, tenant_id: str) -> None:
     # Warm edge-tts / network path so the first reply is faster
     async def _warm_tts() -> None:
         try:
-            from app.services.voice.tts import synthesize_with_fallback
-
-            await synthesize_with_fallback("Bonjour.")
+            await get_tts_provider().prime()
         except Exception:
             logger.debug("TTS warm-up skipped", exc_info=True)
 

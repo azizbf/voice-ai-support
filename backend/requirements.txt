@@ -20,5 +20,6 @@ voyageai==0.3.7
 sqlalchemy[asyncio]==2.0.40
 asyncpg==0.30.0
 greenlet==3.1.1
+pgvector==0.4.1
 # Optional server STT (otherwise browser Web Speech API is used):
 faster-whisper==1.1.1

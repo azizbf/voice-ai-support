@@ -19,7 +19,7 @@ from app.models.schemas import (
 from app.services.pdf.extractor import PdfValidationError, extract_pdf, validate_pdf_bytes
 from app.services.rag.service import rag_service
 from app.services.session.service import session_service
-from app.services.vectorstore.faiss_store import FaissVectorStore
+from app.services.vectorstore.factory import get_vector_store
 
 router = APIRouter(prefix="/api/v1/tenants", tags=["tenants"])
 
@@ -187,7 +187,7 @@ async def clear_knowledge(
     meta = await session_service.load_meta(tenant_id)
     if meta is None:
         raise HTTPException(status_code=404, detail="Tenant introuvable.")
-    store = FaissVectorStore()
+    store = get_vector_store()
     await store.delete_tenant(tenant_id)
     await session_service.clear_knowledge(tenant_id)
     return OkResponse(ok=True)

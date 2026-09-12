@@ -41,6 +41,10 @@ async def lifespan(app: FastAPI):
     settings.data_path.mkdir(parents=True, exist_ok=True)
     try:
         await init_db()
+        from app.services.vectorstore.factory import reset_vector_store, vector_store_name
+
+        reset_vector_store()
+        logger.info("Vector store: %s", vector_store_name())
     except Exception:  # noqa: BLE001
         logger.exception("PostgreSQL init failed — continuing in file/FAISS mode")
 

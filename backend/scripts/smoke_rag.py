@@ -1,4 +1,4 @@
-"""Smoke test: PDF extract → chunk → embed → FAISS → retrieve (no Claude required)."""
+"""Smoke test: PDF extract → chunk → embed → vector store → retrieve (no Claude required)."""
 from __future__ import annotations
 
 import asyncio
@@ -8,14 +8,17 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+from app.db.session import close_db, init_db
 from app.services.pdf.extractor import extract_pdf
 from app.services.rag.chunking import chunk_pages
 from app.services.rag.embeddings import get_embedding_provider
 from app.services.session.service import session_service
-from app.services.vectorstore.faiss_store import FaissVectorStore
+from app.services.vectorstore.factory import get_vector_store, reset_vector_store
 
 
 async def main() -> None:
+    await init_db()
+    reset_vector_store()
     sample = ROOT / "samples" / "faq_internet.pdf"
     if not sample.exists():
         from scripts.make_sample_pdf import main as make_pdf
@@ -38,7 +41,7 @@ async def main() -> None:
 
     embedder = get_embedding_provider()
     vectors = await embedder.embed_documents([c.text for c in chunks])
-    store = FaissVectorStore()
+    store = get_vector_store()
     await store.upsert(tenant_id, chunks, vectors)
 
     q = await embedder.embed_query("Ma connexion internet ne fonctionne plus")
@@ -46,7 +49,8 @@ async def main() -> None:
     assert hits, "expected retrieval hits"
     for h in hits:
         print(f"score={h.score:.3f} page={h.chunk.page} text={h.chunk.text[:80]}...")
-    print("SMOKE_OK", tenant_id)
+    print("SMOKE_OK", tenant_id, getattr(store, "name", store.__class__.__name__))
+    await close_db()
 
 
 if __name__ == "__main__":

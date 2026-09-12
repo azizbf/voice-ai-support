@@ -7,6 +7,7 @@ from fastapi import APIRouter, Header, HTTPException
 from app.core.config import get_settings
 from app.db.repository import db_list_tenants, db_overview, db_tenant_detail
 from app.db.session import postgres_ready
+from app.services.vectorstore.factory import vector_store_name
 
 logger = logging.getLogger(__name__)
 
@@ -25,8 +26,8 @@ async def dashboard_status():
     return {
         "postgres_configured": settings.postgres_enabled,
         "postgres_connected": postgres_ready(),
-        "vector_store": "faiss",
-        "note": "Vectors stay in FAISS; tenants/documents/messages are in PostgreSQL when DATABASE_URL is set.",
+        "vector_store": vector_store_name(),
+        "note": "Embeddings live in PostgreSQL via pgvector when DATABASE_URL is set; otherwise FAISS files.",
     }
 
 

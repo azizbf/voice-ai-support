@@ -6,6 +6,7 @@ from app.core.config import get_settings
 from app.core.logging_metrics import latency_store
 from app.db.session import postgres_ready
 from app.models.schemas import HealthResponse
+from app.services.vectorstore.factory import vector_store_name
 
 router = APIRouter(tags=["system"])
 
@@ -37,7 +38,7 @@ async def storage_status():
     return {
         "postgres_configured": settings.postgres_enabled,
         "postgres_connected": postgres_ready(),
-        "vector_store": "faiss",
+        "vector_store": vector_store_name(),
         "data_dir": settings.data_dir,
     }
 

@@ -13,7 +13,7 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 ```
 frontend (Next.js)  ←→  backend (FastAPI)
                            ├─ PDF extract / chunk
-                           ├─ Embeddings → FAISS (per tenant)
+                           ├─ Embeddings → pgvector (Postgres)
                            ├─ Claude chat + SSE stream
                            └─ WebSocket voice (STT → Claude → TTS)
 ```
@@ -89,11 +89,11 @@ Fallbacks without optional keys:
 1. PDF validated (type, size, magic bytes).
 2. Text extracted **with page numbers**.
 3. Cleaned and chunked (~1800 chars, overlap).
-4. Embedded once and stored in a **tenant-scoped FAISS** index + `chunks.jsonl` metadata.
+4. Embedded once and stored in **PostgreSQL pgvector** (`chunks.embedding`, cosine search). FAISS files are only used if Postgres/pgvector is unavailable.
 5. Queries embed the question, search that tenant only, pass top chunks to Claude.
 6. If nothing relevant: Claude is instructed to say it lacks information and recommend human escalation.
 
-Indexes are persisted under `backend/data/{tenant_id}/` and **not** rebuilt per question.
+Indexes are persisted in Postgres and **not** rebuilt per question.
 
 ## How voice works
 
@@ -108,7 +108,7 @@ Use **Chrome or Edge** for the best Web Speech experience.
 
 ## Multi-tenant design
 
-Each demo session creates a `tenant_id`. FAISS files and metadata are isolated. Retrieval asserts tenant match. Never shares chunks across companies.
+Each demo session creates a `tenant_id`. Chunks and embeddings are isolated by `tenant_id`. Retrieval filters on that tenant only. Never shares chunks across companies.
 
 ## Security
 
@@ -129,11 +129,10 @@ Each demo session creates a `tenant_id`. FAISS files and metadata are isolated. 
    DATABASE_URL=postgresql+asyncpg://postgres:YOUR_PASSWORD@localhost:5432/vantage_ai
    DASHBOARD_API_KEY=dev-dashboard-key
    ```
-3. Restart the API — tables are created automatically.
+3. Restart the API — tables and `CREATE EXTENSION vector` run automatically.
 4. Open http://localhost:3000/dashboard
 
-Postgres stores tenants, documents, chunk text, conversations, messages.  
-Vectors stay in FAISS for now (pgvector can replace them later).
+Postgres stores tenants, documents, chunk text, embeddings (pgvector), conversations, messages.
 
 Docker DB only: `docker compose up db -d` → URL  
 `postgresql+asyncpg://vantage:vantage@localhost:5432/vantage_ai`

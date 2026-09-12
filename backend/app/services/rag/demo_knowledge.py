@@ -59,11 +59,11 @@ Demander: « Êtes-vous reconnecté au Wi-Fi ? Internet fonctionne-t-il maintena
 Si Internet ne revient pas après l'étape 4: ouvrir un ticket technique niveau 2.""",
     """Forfaits Fibre — tarifs 2026
 Fibre 50 Mbps: 39 DT / mois. Frais de mise en service: 30 DT.
-Fibre 100 Mbps: 59 DT / mois. Frais de mise en service: 50 DT.
+Fibre 100 Mbps (aussi dit 100 mégabits, 100 Mb/s, cent méga, forfait 100): 59 DT / mois. Frais de mise en service: 50 DT.
 Fibre 300 Mbps: 89 DT / mois. Frais de mise en service: 50 DT.
 Engagement standard: 12 mois. Sans engagement: +10 DT / mois.
 Promotion en cours (mars–juin): Fibre 100 à 49 DT les 3 premiers mois pour les nouveaux clients.
-Les tarifs incluent la box Wi-Fi. Le décodeur TV est optionnel (+8 DT / mois).""",
+Les tarifs incluent la box Wi-Fi. Le décodeur TV est optionnel (+8 DT / mois)."""
     """Facturation et paiements
 La facture est émise le 1er de chaque mois. Échéance: le 15.
 Modes de paiement: agence, espace client, carte bancaire, Flouci, charge électronique.

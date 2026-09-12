@@ -204,7 +204,7 @@ export default function HomePage() {
         active: kbBusy && status?.status !== "ready",
       },
       {
-        label: "Index vectoriel (FAISS)",
+        label: "Index vectoriel (pgvector)",
         done: !!status && (status.pipeline.ready || status.status === "ready"),
         active: !!status?.pipeline.creating_knowledge_base && status.status !== "ready",
       },
@@ -563,8 +563,8 @@ export default function HomePage() {
             <div className="glass rounded-3xl p-6">
               <h3 className="font-display text-lg font-semibold text-ink">Isolation multi-tenant</h3>
               <p className="mt-2 text-sm leading-relaxed text-soft">
-                Chaque session démo a son propre index FAISS. Aucune retrieval croisée entre
-                entreprises.
+                Chaque session démo a ses propres embeddings, filtrés par tenant_id. Aucune
+                retrieval croisée entre entreprises.
               </p>
             </div>
           </div>

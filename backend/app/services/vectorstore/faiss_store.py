@@ -13,6 +13,9 @@ from app.services.vectorstore.base import ScoredChunk, VectorStore
 
 
 class FaissVectorStore(VectorStore):
+    name = "faiss"
+    persists_chunks = False
+
     def __init__(self) -> None:
         self.settings = get_settings()
 
@@ -27,7 +30,7 @@ class FaissVectorStore(VectorStore):
     def _meta_path(self, tenant_id: str) -> Path:
         return self._index_dir(tenant_id) / "chunks.jsonl"
 
-    def exists(self, tenant_id: str) -> bool:
+    async def exists(self, tenant_id: str) -> bool:
         return self._index_path(tenant_id).exists() and self._meta_path(tenant_id).exists()
 
     async def upsert(self, tenant_id: str, chunks: list[ChunkRecord], vectors: np.ndarray) -> None:
@@ -50,7 +53,7 @@ class FaissVectorStore(VectorStore):
                 f.write(chunk.model_dump_json() + "\n")
 
     def _load(self, tenant_id: str) -> tuple[faiss.Index, list[ChunkRecord]]:
-        if not self.exists(tenant_id):
+        if not (self._index_path(tenant_id).exists() and self._meta_path(tenant_id).exists()):
             raise FileNotFoundError(f"No index for tenant {tenant_id}")
         index_stat = self._index_path(tenant_id).stat()
         meta_stat = self._meta_path(tenant_id).stat()
