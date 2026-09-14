@@ -46,18 +46,7 @@ async def create_tenant(request: Request) -> TenantCreateResponse:
         pipeline=PipelineStatus(extracting=False, creating_knowledge_base=True, ready=False),
     )
 
-    async def _seed() -> None:
-        try:
-            await rag_service.ingest_demo_knowledge(meta.tenant_id)
-        except Exception as exc:  # noqa: BLE001
-            await session_service.set_status(
-                meta.tenant_id,
-                "error",
-                detail=f"Erreur démo: {exc}",
-                pipeline=PipelineStatus(),
-            )
-
-    asyncio.create_task(_seed())
+    rag_service.start_demo_ingest(meta.tenant_id)
     return TenantCreateResponse(tenant_id=meta.tenant_id, token=token, expires_at=meta.expires_at)
 
 
@@ -70,6 +59,9 @@ async def get_tenant_status(
     meta = await session_service.load_meta(tenant_id)
     if meta is None:
         raise HTTPException(status_code=404, detail="Tenant introuvable.")
+    # Reload kills fire-and-forget ingest tasks; resume if the UI is still polling.
+    if meta.status == "processing" and not meta.pipeline.extracting:
+        rag_service.start_demo_ingest(tenant_id)
     return TenantStatusResponse(
         tenant_id=meta.tenant_id,
         status=meta.status,
@@ -156,18 +148,7 @@ async def load_demo_knowledge(
         pipeline=PipelineStatus(extracting=False, creating_knowledge_base=True, ready=False),
     )
 
-    async def _process() -> None:
-        try:
-            await rag_service.ingest_demo_knowledge(tenant_id)
-        except Exception as exc:  # noqa: BLE001
-            await session_service.set_status(
-                tenant_id,
-                "error",
-                detail=f"Erreur démo: {exc}",
-                pipeline=PipelineStatus(),
-            )
-
-    asyncio.create_task(_process())
+    rag_service.start_demo_ingest(tenant_id)
     from app.services.rag.demo_knowledge import DEMO_DOCUMENT_NAME, DEMO_PAGES
 
     return DocumentUploadResponse(

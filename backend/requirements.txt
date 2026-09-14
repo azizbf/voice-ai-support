@@ -5,6 +5,7 @@ pydantic==2.11.3
 pydantic-settings==2.9.1
 anthropic==0.51.0
 httpx==0.28.1
+h2==4.3.0
 numpy==2.2.5
 faiss-cpu==1.11.0
 pypdf==5.4.0
@@ -23,3 +24,5 @@ greenlet==3.1.1
 pgvector==0.4.1
 # Optional server STT (otherwise browser Web Speech API is used):
 faster-whisper==1.1.1
+onnxruntime>=1.22.1
+silero-vad==5.1.2

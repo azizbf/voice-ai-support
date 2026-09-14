@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import logging
+import time
 import uuid
 from pathlib import Path
 
@@ -17,7 +19,7 @@ from app.models.schemas import (
 from app.services.pdf.extractor import PdfValidationError, extract_pdf, validate_pdf_bytes
 from app.services.rag.chunking import chunk_pages
 from app.services.rag.embeddings import get_embedding_provider
-from app.services.rag.query import lexical_needles, normalize_query
+from app.services.rag.query import expand_retrieval_query, lexical_needles
 from app.services.session.service import session_service
 from app.services.vectorstore.factory import get_vector_store
 
@@ -30,8 +32,9 @@ Tu utilises UNIQUEMENT la base de connaissances fournie comme source de vérité
 Quand un tarif, une procédure ou une politique apparaît dans le contexte, tu le donnes
 directement et précisément (ex: prix en DT, délais, étapes) — ne dis PAS que tu n'as pas
 l'information si elle est présente.
-Questions forfait / Fibre 50, 100 ou 300: si le contexte contient « Forfaits Fibre » ou un
-prix en DT, cite le prix mensuel, les frais de mise en service et l'engagement. N'escalade pas.
+Questions offres / forfait / Fibre 50, 100 ou 300: si le contexte contient « Forfaits Fibre »
+ou un prix en DT, liste les forfaits présents (prix mensuel et frais de mise en service).
+N'escalade pas.
 Pour les procédures guidées (réinitialisation routeur, diagnostic panne, etc.):
 donne UNE seule étape à la fois, demande au client de confirmer quand c'est fait,
 puis passe à l'étape suivante seulement après sa confirmation. Ne récite jamais toute
@@ -45,6 +48,8 @@ Réponds toujours en français."""
 class RagService:
     def __init__(self) -> None:
         self.settings = get_settings()
+        self._demo_jobs: dict[str, asyncio.Task] = {}
+        self.last_timings: dict[str, float] = {}
 
     @property
     def store(self):
@@ -178,26 +183,62 @@ class RagService:
         logger.info("Ingested %s chunks for tenant %s (%s)", len(chunks), tenant_id, filename)
         return info
 
+    def start_demo_ingest(self, tenant_id: str) -> asyncio.Task:
+        """Index the demo FAQ, or no-op if that tenant is already ingesting."""
+        existing = self._demo_jobs.get(tenant_id)
+        if existing is not None and not existing.done():
+            return existing
+
+        async def _run() -> None:
+            try:
+                await self.ingest_demo_knowledge(tenant_id)
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("Demo ingest failed for %s", tenant_id)
+                await session_service.set_status(
+                    tenant_id,
+                    "error",
+                    detail=f"Erreur démo: {exc}",
+                    pipeline=PipelineStatus(),
+                )
+            finally:
+                current = self._demo_jobs.get(tenant_id)
+                if current is asyncio.current_task():
+                    self._demo_jobs.pop(tenant_id, None)
+
+        task = asyncio.create_task(_run())
+        self._demo_jobs[tenant_id] = task
+        return task
+
     async def retrieve(self, tenant_id: str, query: str, top_k: int | None = None) -> tuple[list[RetrievedChunk], float]:
         meta = await session_service.load_meta(tenant_id)
         if meta is None or meta.status != "ready":
             raise ValueError("La base de connaissances n'est pas prête pour ce tenant.")
+        backfill_ms = 0.0
         if not await self.store.exists(tenant_id):
             backfill = getattr(self.store, "backfill_missing_embeddings", None)
             if callable(backfill):
+                started = time.perf_counter()
                 await backfill(tenant_id)
+                backfill_ms = (time.perf_counter() - started) * 1000
         if not await self.store.exists(tenant_id):
             raise ValueError(
                 "La base de connaissances n'est pas prête pour ce tenant. "
                 "Démarrez une nouvelle session pour réindexer."
             )
 
-        query = normalize_query(query)
+        user_query = query
+        query = expand_retrieval_query(query)
         k = max(top_k or self.settings.rag_top_k, 4)
+        load_started = time.perf_counter()
         embedder = get_embedding_provider()
+        load_ms = (time.perf_counter() - load_started) * 1000
         with timed() as t:
+            embed_started = time.perf_counter()
             qvec = await embedder.embed_query(query)
+            embed_ms = (time.perf_counter() - embed_started) * 1000
+            search_started = time.perf_counter()
             scored = await self.store.search(tenant_id, qvec[0], k)
+            search_ms = (time.perf_counter() - search_started) * 1000
 
         chunks: list[RetrievedChunk] = []
         seen: set[str] = set()
@@ -215,24 +256,35 @@ class RagService:
                 )
             )
 
-        needles = lexical_needles(query)
+        needles = lexical_needles(user_query)
         if needles:
-            from app.db.repository import db_keyword_chunks
+            keyed = await self.store.keyword_chunks(tenant_id, needles)
+            if not keyed:
+                from app.db.repository import db_keyword_chunks
 
-            for row in await db_keyword_chunks(tenant_id, needles):
-                if row.id in seen:
+                keyed = await db_keyword_chunks(tenant_id, needles)
+            for row in keyed:
+                chunk_id = getattr(row, "chunk_id", None) or getattr(row, "id", "")
+                if not chunk_id or chunk_id in seen:
                     continue
-                seen.add(row.id)
+                text = getattr(row, "text", None) or getattr(row, "content", "") or ""
+                seen.add(chunk_id)
                 chunks.append(
                     RetrievedChunk(
-                        chunk_id=row.id,
+                        chunk_id=chunk_id,
                         document_name=row.document_name,
                         page=row.page,
-                        text=row.content,
-                        score=0.55,
+                        text=text,
+                        score=0.62 if "forfaits fibre" in text.lower() else 0.55,
                     )
                 )
         chunks.sort(key=lambda c: c.score, reverse=True)
+        self.last_timings = {
+            "rag_embed_load_ms": round(load_ms),
+            "rag_embed_ms": round(embed_ms),
+            "rag_search_ms": round(search_ms),
+            "rag_backfill_ms": round(backfill_ms),
+        }
         return chunks, t["elapsed_ms"]
 
     def format_context(self, chunks: list[RetrievedChunk]) -> str:

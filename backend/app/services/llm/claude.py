@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import logging
+import asyncio
+import time
 from collections.abc import AsyncIterator
 from typing import Any
 
-from anthropic import AsyncAnthropic
+from anthropic import AsyncAnthropic, DefaultAsyncHttpxClient
+import httpx
 
 from app.core.config import get_settings
 from app.core.logging_metrics import LatencySample, latency_store, timed
@@ -18,6 +21,8 @@ class ClaudeService:
     def __init__(self) -> None:
         self.settings = get_settings()
         self._client: AsyncAnthropic | None = None
+        self._last_used = 0.0
+        self._warm_lock = asyncio.Lock()
 
     def refresh_settings(self) -> None:
         get_settings.cache_clear()
@@ -29,12 +34,39 @@ class ClaudeService:
     def client(self) -> AsyncAnthropic:
         if self._client is None:
             self.refresh_settings()
+            if self.settings.llm_provider == "gemini":
+                from app.services.llm.gemini import GeminiClient
+                self._client = GeminiClient(self.settings.gemini_api_key, self.settings.gemini_model)
+                self._last_used = time.monotonic()
+                return self._client
             if not self.settings.anthropic_api_key:
                 raise RuntimeError(
                     "ANTHROPIC_API_KEY manquante. Ajoutez-la dans backend/.env puis redémarrez l'API."
                 )
-            self._client = AsyncAnthropic(api_key=self.settings.anthropic_api_key)
+            self._client = AsyncAnthropic(
+                api_key=self.settings.anthropic_api_key,
+                http_client=DefaultAsyncHttpxClient(limits=httpx.Limits(
+                    max_connections=50, max_keepalive_connections=20, keepalive_expiry=120.0,
+                )),
+            )
+        self._last_used = time.monotonic()
         return self._client
+
+    async def warm_connection(self) -> None:
+        """Open TLS before the first voice token without starting a competing generate."""
+        async with self._warm_lock:
+            if self._client is not None and time.monotonic() - self._last_used < 30:
+                return
+            try:
+                client = self.client
+                await client.with_options(timeout=3.0, max_retries=0).models.list(limit=1)
+            except Exception:
+                logger.debug("AI connection warm-up skipped", exc_info=True)
+
+    async def close(self) -> None:
+        if self._client is not None:
+            await self._client.close()
+            self._client = None
 
     def _user_message(self, question: str, context: str) -> str:
         return (

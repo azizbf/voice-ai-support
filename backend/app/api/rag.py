@@ -72,7 +72,7 @@ async def synthesize_speech(
     body: TtsRequest,
     x_tenant_token: str | None = Header(default=None),
 ):
-    """Neural French TTS via Microsoft edge-tts (Vivienne)."""
+    """French speech synthesis using the configured TTS provider."""
     require_tenant_auth(body.tenant_id, x_tenant_token)
     text = body.text.strip()
     if not text:

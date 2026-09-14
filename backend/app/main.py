@@ -48,13 +48,13 @@ async def lifespan(app: FastAPI):
     except Exception:  # noqa: BLE001
         logger.exception("PostgreSQL init failed — continuing in file/FAISS mode")
 
-    # Warm embeddings in background so API accepts requests immediately
+    # Load embeddings and Whisper before serving if possible, but do not block
+    # HTTP on GPU/model download — health reports starting until they finish.
     async def _warm_embeddings() -> None:
         try:
-            from app.services.rag.embeddings import get_embedding_provider
+            from app.services.rag.embeddings import warm_embeddings
 
-            await asyncio.to_thread(get_embedding_provider)
-            logger.info("Embedding provider ready")
+            await asyncio.to_thread(warm_embeddings)
         except Exception:  # noqa: BLE001
             logger.exception("Embedding warm-up failed")
 
@@ -70,8 +70,22 @@ async def lifespan(app: FastAPI):
 
     voice_warm_task = asyncio.create_task(_warm_voice())
     task = asyncio.create_task(_cleanup_loop())
+
+    async def _resume_demo_ingests() -> None:
+        from app.services.rag.service import rag_service as rag
+
+        resumed = 0
+        for meta in session_service.list_metas():
+            if meta.status == "processing" and not meta.pipeline.extracting:
+                rag.start_demo_ingest(meta.tenant_id)
+                resumed += 1
+        if resumed:
+            logger.info("Resumed demo ingest for %s stuck tenant(s)", resumed)
+
+    resume_task = asyncio.create_task(_resume_demo_ingests())
     logger.info("Voice AI Support API starting (env=%s)", settings.app_env)
     yield
+    resume_task.cancel()
     warm_task.cancel()
     voice_warm_task.cancel()
     task.cancel()
@@ -88,6 +102,13 @@ async def lifespan(app: FastAPI):
     except asyncio.CancelledError:
         pass
     await close_db()
+    from app.services.voice.tts import get_tts_provider
+
+    await get_tts_provider().close()
+    get_tts_provider.cache_clear()
+    from app.services.llm.claude import claude_service
+
+    await claude_service.close()
 
 
 def create_app() -> FastAPI:

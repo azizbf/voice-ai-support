@@ -36,22 +36,47 @@ function authHeaders(token: string): HeadersInit {
   return { "X-Tenant-Token": token };
 }
 
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+async function fetchJson<T>(
+  input: RequestInfo,
+  init?: RequestInit,
+  retries = 5,
+): Promise<T> {
+  let lastError: Error | null = null;
+  for (let attempt = 0; attempt < retries; attempt++) {
+    try {
+      const res = await fetch(input, init);
+      if (res.ok) return (await res.json()) as T;
+      const body = await res.text();
+      lastError = new Error(body || `HTTP ${res.status}`);
+      if (res.status < 500 || attempt === retries - 1) throw lastError;
+    } catch (err) {
+      lastError = err instanceof Error ? err : new Error(String(err));
+      const retryable =
+        lastError.message.startsWith("HTTP 5") ||
+        /Failed to fetch|NetworkError|ECONNREFUSED|Erreur interne|Executor shutdown/i.test(
+          lastError.message,
+        );
+      if (!retryable || attempt === retries - 1) throw lastError;
+    }
+    await sleep(400 * (attempt + 1));
+  }
+  throw lastError ?? new Error("Request failed");
+}
+
 export async function createTenant(): Promise<{
   tenant_id: string;
   token: string;
   expires_at: string;
 }> {
-  const res = await fetch(`${API_URL}/api/v1/tenants`, { method: "POST" });
-  if (!res.ok) throw new Error(await res.text());
-  return res.json();
+  return fetchJson(`${API_URL}/api/v1/tenants`, { method: "POST" });
 }
 
 export async function getStatus(tenantId: string, token: string): Promise<TenantStatus> {
-  const res = await fetch(`${API_URL}/api/v1/tenants/${tenantId}/status`, {
+  return fetchJson(`${API_URL}/api/v1/tenants/${tenantId}/status`, {
     headers: authHeaders(token),
   });
-  if (!res.ok) throw new Error(await res.text());
-  return res.json();
 }
 
 export async function uploadPdf(

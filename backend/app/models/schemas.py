@@ -100,7 +100,13 @@ class HealthResponse(BaseModel):
     status: str = "ok"
     embedding_provider: str | None = None
     stt_provider: str | None = None
+    stt_device: str | None = None
     tts_provider: str | None = None
+    embeddings_ready: bool = False
+    stt_ready: bool = False
+    voice_ready: bool = False
+    stt_impl: str | None = None
+    whisper_keepalive: bool | None = None
 
 
 class PageText(BaseModel):

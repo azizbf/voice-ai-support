@@ -82,8 +82,13 @@ export default function HomePage() {
             if (cancelled) return;
             persistTenant(parsed.tenant_id, parsed.token);
             if (s.status === "processing") {
-              setStatus(s);
-              setPolling(true);
+              try {
+                await loadDemoKnowledge(parsed.tenant_id, parsed.token);
+              } catch {
+                // Status polling / backend resume will retry after a reload.
+              }
+              if (cancelled) return;
+              markProcessing(parsed.tenant_id);
               return;
             }
             if (!needsDemoKb(s)) {
@@ -451,6 +456,16 @@ export default function HomePage() {
                 </div>
               </div>
 
+              <label className="mb-3 block text-xs text-soft">
+                <span className="flex items-center gap-2 font-semibold text-ink">
+                  <input type="checkbox" checked={voice.preferBrowserStt}
+                    onChange={event => voice.setPreferBrowserStt(event.target.checked)}
+                    disabled={inCall || !voice.browserSpeechAvailable} />
+                  Reconnaissance en direct · Chrome / Edge
+                </span>
+                <span className="mt-1 block">Activé : Web Speech. Désactivé : audio enregistré → Whisper serveur. Décochez avant de relancer l’appel. Retour au moteur local si la connexion échoue.</span>
+              </label>
+
               {!inCall ? (
                 <button
                   type="button"
@@ -475,6 +490,7 @@ export default function HomePage() {
                       Micro actif — parlez, puis faites une courte pause. Utilisez Chrome ou Edge.
                     </p>
                   )}
+                  {voice.state !== "connecting" && <p className="text-xs text-soft">Transcription : {voice.serverStt ? "serveur (audio enregistré)" : "navigateur en direct · Web Speech"}</p>}
                   {voice.state === "thinking" && (
                     <p className="text-sm text-soft">Réflexion en cours…</p>
                   )}
@@ -506,7 +522,7 @@ export default function HomePage() {
                 </div>
               )}
 
-              <VoiceDebugPanel turns={voice.debugTurns} />
+              <VoiceDebugPanel turns={voice.debugTurns} llmProvider={voice.llmProvider} llmModel={voice.llmModel} />
 
               <div className="mt-3 flex flex-wrap gap-2">
                 <button

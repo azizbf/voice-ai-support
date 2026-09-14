@@ -19,16 +19,25 @@ async def health() -> HealthResponse:
         if (settings.voyage_api_key and settings.embedding_provider != "local")
         else "local"
     )
-    if settings.deepgram_api_key:
-        stt = "deepgram"
-    else:
-        stt = "client-speech"
+    from app.services.voice.stt import describe_server_stt, stt_ready
+    from app.services.rag.embeddings import embeddings_ready
+
+    info = describe_server_stt()
     tts = "edge-tts"
+    emb_ok = embeddings_ready()
+    stt_ok = stt_ready()
+    voice_ok = emb_ok and stt_ok
     return HealthResponse(
-        status="ok",
+        status="ok" if voice_ok else "starting",
         embedding_provider=embedding,
-        stt_provider=stt,
+        stt_provider=info["stt"],
+        stt_device=info.get("stt_device"),
         tts_provider=tts,
+        embeddings_ready=emb_ok,
+        stt_ready=stt_ok,
+        voice_ready=voice_ok,
+        stt_impl=info.get("stt_impl"),
+        whisper_keepalive=bool(settings.whisper_keepalive),
     )
 
 

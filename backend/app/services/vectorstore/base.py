@@ -35,3 +35,6 @@ class VectorStore(ABC):
 
     async def preload(self, tenant_id: str) -> None:
         return None
+
+    async def keyword_chunks(self, tenant_id: str, needles: list[str], limit: int = 6) -> list[ChunkRecord]:
+        return []

@@ -12,7 +12,7 @@ _STT_FIXES = (
 )
 
 _NEW_TOPIC = re.compile(
-    r"forfait|tarif|prix|fibre|mbps|mhp|méga|mega|résili|factur|déménag|"
+    r"offre|forfait|tarif|prix|fibre|mbps|mhp|méga|mega|résili|factur|déménag|"
     r"paiement|routeur|upgrade|100\s|50\s|300\s",
     re.I,
 )
@@ -36,10 +36,37 @@ def is_followup(text: str) -> bool:
     return bool(_FOLLOWUP.match(stripped)) and not _NEW_TOPIC.search(stripped)
 
 
+_FILLER = re.compile(r"^(euh+|hum+|hmm+|bah+|allo|allô)[\s.!?]*$", re.I)
+
+
+def transcript_needs_clarification(text: str, extra: dict | None = None) -> bool:
+    if extra and int(extra.get("stt_unclear") or 0) == 1:
+        return True
+    stripped = (text or "").strip()
+    if not stripped:
+        return True
+    if is_followup(stripped):
+        return False
+    if _FILLER.match(stripped):
+        return True
+    return False
+
+
+def expand_retrieval_query(text: str) -> str:
+    """Keep the user wording; add catalog synonyms only for retrieval."""
+    query = normalize_query(text)
+    lowered = query.lower()
+    if re.search(r"\boffres?\b", lowered) and not re.search(r"forfait|fibre|tarif|prix", lowered):
+        return f"{query} forfaits fibre tarifs"
+    return query
+
+
 def lexical_needles(text: str) -> list[str]:
     t = normalize_query(text).lower()
     needles: list[str] = []
-    if "forfait" in t or "tarif" in t or "prix" in t:
+    if re.search(r"\boffres?\b", t):
+        needles.append("Forfaits Fibre")
+    if "forfait" in t or "tarif" in t or "prix" in t or re.search(r"\boffres?\b", t):
         needles.append("Forfait")
     if "fibre" in t:
         needles.append("Fibre")

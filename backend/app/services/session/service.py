@@ -6,8 +6,6 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-import aiofiles
-
 from app.core.config import get_settings
 from app.models.schemas import DocumentInfo, PipelineStatus, TenantMeta, TenantStatus
 
@@ -54,15 +52,15 @@ class SessionService:
 
     async def save_meta(self, meta: TenantMeta) -> None:
         path = self.meta_path(meta.tenant_id)
-        async with aiofiles.open(path, "w", encoding="utf-8") as f:
-            await f.write(meta.model_dump_json(indent=2))
+        # Tiny JSON; write on the event-loop thread to avoid aiofiles'
+        # default executor, which raises "Executor shutdown" during uvicorn --reload.
+        path.write_text(meta.model_dump_json(indent=2), encoding="utf-8")
 
     async def load_meta(self, tenant_id: str) -> TenantMeta | None:
         path = self.meta_path(tenant_id)
         if not path.exists():
             return None
-        async with aiofiles.open(path, "r", encoding="utf-8") as f:
-            raw = await f.read()
+        raw = path.read_text(encoding="utf-8")
         return TenantMeta.model_validate_json(raw)
 
     async def set_status(
@@ -111,6 +109,23 @@ class SessionService:
         path = self.settings.data_path / tenant_id
         if path.exists():
             shutil.rmtree(path)
+
+    def list_metas(self) -> list[TenantMeta]:
+        root = self.settings.data_path
+        if not root.exists():
+            return []
+        metas: list[TenantMeta] = []
+        for child in root.iterdir():
+            if not child.is_dir():
+                continue
+            meta_file = child / "meta.json"
+            if not meta_file.exists():
+                continue
+            try:
+                metas.append(TenantMeta.model_validate_json(meta_file.read_text(encoding="utf-8")))
+            except Exception:
+                continue
+        return metas
 
     async def cleanup_expired(self) -> int:
         removed = 0

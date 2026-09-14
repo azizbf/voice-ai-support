@@ -1,5 +1,6 @@
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -9,6 +10,9 @@ class Settings(BaseSettings):
 
     app_env: str = "development"
     anthropic_api_key: str = ""
+    llm_provider: Literal["anthropic", "gemini"] = "anthropic"
+    gemini_api_key: str = ""
+    gemini_model: str = "gemini-3.5-flash-lite"
     anthropic_model: str = "claude-sonnet-5"
     # Faster model for live voice turns (override with ANTHROPIC_VOICE_MODEL)
     anthropic_voice_model: str = "claude-haiku-4-5"
@@ -22,10 +26,18 @@ class Settings(BaseSettings):
     # Local STT: tiny | base | small (CPU). base is much faster than small for short turns.
     whisper_model: str = "base"
     whisper_cpu_threads: int = 4
+    whisper_device: Literal["cpu", "cuda", "auto"] = "cpu"
     elevenlabs_api_key: str = ""
     elevenlabs_voice_id: str = ""
+    tts_provider: Literal["edge", "elevenlabs"] = "edge"
+    elevenlabs_model: str = "eleven_flash_v2_5"
     # Neural French voice (Microsoft edge-tts)
-    edge_tts_voice: str = "fr-FR-VivienneMultilingualNeural"
+    edge_tts_voice: str = "fr-FR-DeniseNeural"
+    whisper_keepalive: bool = True
+    voice_smart_turn: bool = False
+    voice_smart_turn_pause_ms: int = 280
+    voice_smart_turn_extend_ms: int = 720
+    voice_smart_turn_fallback_ms: int = 1400
 
     cors_origins: str = "http://localhost:3000"
     data_dir: str = "./data"
@@ -49,6 +61,12 @@ class Settings(BaseSettings):
     # auto = pgvector when DATABASE_URL is set, otherwise FAISS files
     vector_store: str = "auto"  # auto | pgvector | faiss
     embedding_dimensions: int = 384
+
+    @property
+    def active_llm_model(self) -> str:
+        if self.llm_provider == "gemini":
+            return self.gemini_model
+        return self.anthropic_voice_model or self.anthropic_model
 
     @property
     def cors_origin_list(self) -> list[str]:

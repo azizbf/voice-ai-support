@@ -90,6 +90,19 @@ class FaissVectorStore(VectorStore):
             results.append(ScoredChunk(chunk=chunk, score=float(score)))
         return results
 
+    async def keyword_chunks(self, tenant_id: str, needles: list[str], limit: int = 6) -> list[ChunkRecord]:
+        if not needles or not await self.exists(tenant_id):
+            return []
+        _, chunks = self._load(tenant_id)
+        lowered = [needle.lower() for needle in needles if needle and len(needle.strip()) >= 2]
+        hits: list[ChunkRecord] = []
+        for chunk in chunks:
+            text = chunk.text.lower()
+            if any(needle in text for needle in lowered):
+                hits.append(chunk)
+        hits.sort(key=lambda chunk: ("forfaits fibre" not in chunk.text.lower(), chunk.page))
+        return hits[:limit]
+
     async def delete_tenant(self, tenant_id: str) -> None:
         self._load_version.cache_clear()
         for path in (self._index_path(tenant_id), self._meta_path(tenant_id)):
